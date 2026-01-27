@@ -5,102 +5,124 @@ using Unity.MLAgents.Sensors;
 using Unity.MLAgents.Actuators;
 
 /// <summary>
-/// ArmAgent controls a 3-DOF robotic arm (shoulder yaw, shoulder pitch, elbow pitch)
-/// to strike a target "mole" using a downward-mounted mallet.
+/// ArmAgent controls a 3-DOF robotic arm using custom kinematic rotation physics.
+/// Each joint has configurable angle limits, max speed, and acceleration.
+/// The agent outputs target velocities [-1, 1] which are smoothed via acceleration.
 /// 
-/// The agent learns via PPO to:
-/// 1. Position and orient the arm toward the target
-/// 2. Execute downward strikes with sufficient velocity
-/// 3. Maximize impact velocity for bonus rewards
-/// 4. Avoid self-collisions and stay within joint limits
-/// 
-/// Observations: Joint angles (3), angular velocities (3), mallet position (3), 
-///               mallet velocity (3), target relative position (3), 
-///               target distance (1), active flag (1) = 18 total
-/// 
-/// Actions: Continuous delta rotations for 3 joints (mapped from [-1, 1])
-/// 
+/// Observations (17 total):
+///   - Joint angles (3) normalized by limits
+///   - Joint angular velocities (3) normalized by max speed
+///   - Mallet world position (3)
+///   - Mallet world velocity (3)
+///   - Target relative position (3)
+///   - Distance to target (1)
+///
+/// Actions (3 continuous):
+///   - Target angular velocity for each joint [-1, 1] mapped to [-maxSpeed, +maxSpeed]
+///
 /// Rewards:
-/// - +1.0 for valid mole strike (downward velocity, upward normal)
-/// - +0.2 × impactVelocity bonus (clamped 0–5 m/s)
-/// - -0.001 per timestep (time pressure)
-/// - Optional: -0.01 × distance to target (shaping)
+///   - +1.0 for valid mole strike
+///   - +0.2 × impact velocity bonus
+///   - -0.001 per step (time pressure)
+///   - -0.01 × normalized distance (shaping)
 /// </summary>
 public class ArmAgent : Agent
 {
     // ============================================================================
-    // JOINT REFERENCES
+    // JOINT CONFIGURATION (per-joint settings)
     // ============================================================================
-    
-    [Header("Joint References")]
-    [SerializeField] private Rigidbody shoulderYawRigidbody;
-    [SerializeField] private Rigidbody shoulderPitchRigidbody;
-    [SerializeField] private Rigidbody elbowPitchRigidbody;
-    
+
+    [System.Serializable]
+    public class JointConfig
+    {
+        [Tooltip("The Transform to rotate (pivot point of this joint)")]
+        public Transform jointTransform;
+
+        [Tooltip("Local rotation axis for this joint (e.g., Vector3.up for yaw)")]
+        public Vector3 rotationAxis = Vector3.right;
+
+        [Tooltip("Minimum angle in degrees (local space)")]
+        public float minAngle = -90f;
+
+        [Tooltip("Maximum angle in degrees (local space)")]
+        public float maxAngle = 90f;
+
+        [Tooltip("Maximum angular speed in degrees/sec")]
+        public float maxSpeed = 180f;
+
+        [Tooltip("Angular acceleration in degrees/sec²")]
+        public float acceleration = 720f;
+
+        [Tooltip("Starting angle in degrees")]
+        public float startAngle = 0f;
+
+        // Runtime state
+        [HideInInspector] public float currentAngle;
+        [HideInInspector] public float currentVelocity;
+    }
+
+    [Header("Joint Configs (Shoulder Yaw, Shoulder Pitch, Elbow Pitch)")]
+    [SerializeField] private JointConfig[] joints = new JointConfig[3];
+
+    [Header("Mallet & Target")]
+    [SerializeField] private Transform malletTransform;
     [SerializeField] private Rigidbody malletRigidbody;
     [SerializeField] private Transform targetTransform;
-    
+
     // ============================================================================
-    // JOINT CONTROL PARAMETERS
+    // STRIKE VALIDATION
     // ============================================================================
-    
-    [Header("Joint Control")]
-    [SerializeField] private float maxAngularVelocity = 180f; // degrees/sec
-    [SerializeField] private float actionScale = 30f; // scales action [-1,1] to delta velocity
-    
-    [Header("Joint Motor Settings")]
-    [Tooltip("Maximum motor force applied by hinge motors")]
-    [SerializeField] private float motorForce = 200f;
-    [Tooltip("Whether hinge motors should free spin when target reached")]
-    [SerializeField] private bool motorFreeSpin = false;
-    
-    // ============================================================================
-    // STRIKE VALIDATION PARAMETERS
-    // ============================================================================
-    
+
     [Header("Strike Validation")]
-    [SerializeField] private float minImpactVelocity = 2f; // m/s
-    [SerializeField] private float strikeNormalThreshold = 0.5f; // dot(normal, up) > this
-    [SerializeField] private float strikeVelocityDownwardThreshold = 0.5f; // dot(velocity, down) > this
-    
+    [SerializeField] private float minImpactVelocity = 2f;
+    [SerializeField] private float strikeNormalThreshold = 0.5f;
+    [SerializeField] private float strikeVelocityDownwardThreshold = 0.5f;
+
     // ============================================================================
-    // REWARD PARAMETERS
+    // REWARDS
     // ============================================================================
-    
+
     [Header("Rewards")]
     [SerializeField] private float rewardValidStrike = 1f;
     [SerializeField] private float rewardVelocityMultiplier = 0.2f;
-    [SerializeField] private float rewardMaxVelocityBonus = 5f; // clamp velocity for bonus
+    [SerializeField] private float rewardMaxVelocityBonus = 5f;
     [SerializeField] private float rewardPenaltyPerStep = 0.001f;
-    [SerializeField] private float rewardShapingDistance = 0.01f; // distance shaping strength
+    [SerializeField] private float rewardShapingDistance = 0.01f;
     [SerializeField] private float penaltyBombHit = 2f;
-    
+
     // ============================================================================
-    // EPISODE CONFIGURATION
+    // EPISODE SETTINGS
     // ============================================================================
-    
+
     [Header("Episode Settings")]
     [SerializeField] private int maxStepsPerEpisode = 500;
-    [SerializeField] private Vector3 startingArmRotation = Vector3.zero;
-    [SerializeField] private Vector3 targetStartPosition = new Vector3(0, 1f, 1f);
+    [SerializeField] private Vector3 targetStartPosition = new Vector3(0, 0.5f, 1f);
     [SerializeField] private float targetResetHeight = 0.5f;
     [SerializeField] private float targetRandomRadius = 1.0f;
-    
+
     // ============================================================================
     // RUNTIME STATE
     // ============================================================================
-    
-    private Rigidbody[] jointRigidbodies;
-    private float[] currentTargetAngularVelocities;
-    
+
     private int stepsSinceLastReset = 0;
     private bool strikeValidatedThisFrame = false;
     private float lastImpactVelocity = 0f;
-    // Pending randomized target position to apply on next episode begin
-    private bool pendingRandomTarget = false;
-    private Vector3 pendingRandomTargetPos = Vector3.zero;
 
-    // Small helpers to sanitize observations to avoid NaN/Infinity being passed to ML-Agents
+    private bool pendingRandomTarget = false;
+    // Pending randomized target local offset (local to the agent's transform)
+    private Vector3 pendingRandomLocalOffset = Vector3.zero;
+
+    // Mallet velocity tracking (since we control joints kinematically)
+    private Vector3 lastMalletPosition;
+    private Vector3 computedMalletVelocity;
+    // Mallet local offset relative to the end joint (elbow)
+    private Vector3 malletLocalPosition;
+    private Quaternion malletLocalRotation;
+
+    // ============================================================================
+    // HELPERS
+    // ============================================================================
+
     private static float SafeFloat(float v)
     {
         if (float.IsNaN(v) || float.IsInfinity(v)) return 0f;
@@ -114,357 +136,387 @@ public class ArmAgent : Agent
         v.z = SafeFloat(v.z);
         return v;
     }
-    
+
+    /// <summary>
+    /// Normalize an angle to the range [-180, 180].
+    /// </summary>
+    private static float NormalizeAngle(float angle)
+    {
+        while (angle > 180f) angle -= 360f;
+        while (angle < -180f) angle += 360f;
+        return angle;
+    }
+
     // ============================================================================
     // INITIALIZATION
     // ============================================================================
-    
+
     public override void Initialize()
     {
-        // Cache rigidbody references
-        jointRigidbodies = new Rigidbody[]
+        if (joints == null || joints.Length != 3)
         {
-            shoulderYawRigidbody,
-            shoulderPitchRigidbody,
-            elbowPitchRigidbody
-        };
-        
-        currentTargetAngularVelocities = new float[3];
-        
-        // Validate scene setup
-        if (shoulderYawRigidbody == null || shoulderPitchRigidbody == null || 
-            elbowPitchRigidbody == null || malletRigidbody == null || 
-            targetTransform == null)
-        {
-            Debug.LogError("ArmAgent: Missing rigidbody or target references! " +
-                "Ensure shoulder yaw, shoulder pitch, elbow pitch, mallet, and target are assigned in inspector.");
+            Debug.LogError("ArmAgent: Exactly 3 JointConfigs required.");
             enabled = false;
             return;
         }
-        
-        // Verify HingeJoints are properly configured
-        VerifyJointConfiguration();
-        
-        Debug.Log("ArmAgent initialized successfully. " +
-            $"Joints: {jointRigidbodies.Length}, Mallet: {malletRigidbody.name}, Target: {targetTransform.name}");
-    }
-    
-    private void VerifyJointConfiguration()
-    {
-        foreach (var joint in jointRigidbodies)
+
+        foreach (var j in joints)
         {
-            if (joint.GetComponent<HingeJoint>() == null)
+            if (j.jointTransform == null)
             {
-                Debug.LogWarning($"ArmAgent: Joint {joint.name} does not have a HingeJoint! " +
-                    "Ensure all joint Rigidbodies have HingeJoint components.");
+                Debug.LogError("ArmAgent: A joint Transform is not assigned.");
+                enabled = false;
+                return;
             }
         }
+
+        if (malletTransform == null || targetTransform == null)
+        {
+            Debug.LogError("ArmAgent: Mallet or Target Transform not assigned.");
+            enabled = false;
+            return;
+        }
+
+        // Initialize joint states
+        for (int i = 0; i < joints.Length; i++)
+        {
+            joints[i].currentAngle = joints[i].startAngle;
+            joints[i].currentVelocity = 0f;
+        }
+
+        lastMalletPosition = malletTransform.position;
+        computedMalletVelocity = Vector3.zero;
+
+        // Record mallet's initial local offset relative to the last joint so we can
+        // restore that exact pose each physics tick (prevents snapping issues).
+        if (joints != null && joints.Length > 0 && malletTransform != null)
+        {
+            var endJoint = joints[joints.Length - 1];
+            malletLocalPosition = endJoint.jointTransform.InverseTransformPoint(malletTransform.position);
+            malletLocalRotation = Quaternion.Inverse(endJoint.jointTransform.rotation) * malletTransform.rotation;
+        }
+
+        // Ensure the target is unique per agent. If the assigned Target is shared
+        // (not a child), instantiate a clone as this agent's child so agents don't
+        // overwrite a global target when randomized.
+        if (targetTransform != null && !targetTransform.IsChildOf(this.transform))
+        {
+            GameObject newT = GameObject.Instantiate(targetTransform.gameObject, this.transform);
+            newT.name = targetTransform.gameObject.name + "_agent";
+            targetTransform = newT.transform;
+            Debug.Log($"[ArmAgent] Cloned target for per-agent use: {targetTransform.name}");
+        }
+
+        // Schedule an initial randomized local target offset so the first episode
+        // begins with a randomized target local to this agent.
+        {
+            float r = Random.Range(0f, targetRandomRadius);
+            float theta = Random.Range(0f, Mathf.PI * 2f);
+            // Randomize around configured `targetStartPosition` (local coordinates)
+            pendingRandomLocalOffset = targetStartPosition + new Vector3(Mathf.Cos(theta) * r, 0f, Mathf.Sin(theta) * r);
+            pendingRandomTarget = true;
+            // Apply immediately so the editor/play starts with a random target position
+            ResetTarget();
+        }
+
+        Debug.Log("ArmAgent initialized with custom rotation physics.");
     }
-    
+
     // ============================================================================
-    // OBSERVATION COLLECTION (State)
+    // FIXED UPDATE — CUSTOM PHYSICS TICK
     // ============================================================================
-    
+
+    private void FixedUpdate()
+    {
+        // Keep mallet rigidbody fixed to last joint's transform (elbow)
+        if (joints != null && joints.Length > 0 && malletTransform != null)
+        {
+            var endJoint = joints[joints.Length - 1];
+            // Reconstruct the mallet pose using the stored local offset so the mallet
+            // remains at the same local pose relative to the elbow joint.
+            Vector3 worldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+            Quaternion worldRot = endJoint.jointTransform.rotation * malletLocalRotation;
+            malletTransform.position = worldPos;
+            malletTransform.rotation = worldRot;
+            if (malletRigidbody != null)
+            {
+                malletRigidbody.MovePosition(worldPos);
+                malletRigidbody.MoveRotation(worldRot);
+            }
+        }
+
+        // Compute mallet velocity from position delta (for observations/reward)
+        Vector3 currentPos = malletTransform.position;
+        computedMalletVelocity = (currentPos - lastMalletPosition) / Time.fixedDeltaTime;
+        lastMalletPosition = currentPos;
+    }
+
+    // ============================================================================
+    // OBSERVATIONS
+    // ============================================================================
+
     public override void CollectObservations(VectorSensor sensor)
     {
-        // Joint angles (3) - normalized to [-1, 1]
+        // Joint angles normalized to [-1, 1] based on limits
         for (int i = 0; i < 3; i++)
         {
-            var hinge = jointRigidbodies[i].GetComponent<HingeJoint>();
-            float angleDeg = 0f;
-            if (hinge != null)
-            {
-                angleDeg = hinge.angle; // degrees
-            }
-            else
-            {
-                angleDeg = jointRigidbodies[i].transform.localEulerAngles.x;
-                angleDeg = angleDeg > 180 ? angleDeg - 360 : angleDeg;
-            }
-            sensor.AddObservation(SafeFloat(angleDeg) / 180f);
+            var j = joints[i];
+            float range = j.maxAngle - j.minAngle;
+            float mid = (j.maxAngle + j.minAngle) * 0.5f;
+            float normalized = (range > 0f) ? (j.currentAngle - mid) / (range * 0.5f) : 0f;
+            sensor.AddObservation(SafeFloat(Mathf.Clamp(normalized, -1f, 1f)));
         }
 
-        // Joint angular velocities (3) - degrees/sec normalized by maxAngularVelocity
+        // Joint velocities normalized by max speed
         for (int i = 0; i < 3; i++)
         {
-            var hinge = jointRigidbodies[i].GetComponent<HingeJoint>();
-            float velDeg = 0f;
-            if (hinge != null)
-            {
-                // HingeJoint does not reliably expose an angular velocity property across
-                // Unity versions. Use the joint's Rigidbody angular velocity as a proxy.
-                velDeg = jointRigidbodies[i].angularVelocity.x * Mathf.Rad2Deg;
-            }
-            else
-            {
-                velDeg = jointRigidbodies[i].angularVelocity.x * Mathf.Rad2Deg;
-            }
-            sensor.AddObservation(SafeFloat(velDeg) / maxAngularVelocity);
+            var j = joints[i];
+            float normalized = (j.maxSpeed > 0f) ? j.currentVelocity / j.maxSpeed : 0f;
+            sensor.AddObservation(SafeFloat(Mathf.Clamp(normalized, -1f, 1f)));
         }
 
-        // Mallet position (3)
-        Vector3 malletPos = SafeVector3(malletRigidbody.position);
+        // Mallet world position (normalized loosely)
+        Vector3 malletPos = SafeVector3(malletTransform.position);
         sensor.AddObservation(SafeFloat(malletPos.x) / 2f);
         sensor.AddObservation(SafeFloat(malletPos.y) / 2f);
         sensor.AddObservation(SafeFloat(malletPos.z) / 2f);
 
-        // Mallet velocity (3)
-        Vector3 malletVel = SafeVector3(malletRigidbody.linearVelocity);
-        sensor.AddObservation(Mathf.Clamp(SafeFloat(malletVel.x) / 10f, -1f, 1f));
-        sensor.AddObservation(Mathf.Clamp(SafeFloat(malletVel.y) / 10f, -1f, 1f));
-        sensor.AddObservation(Mathf.Clamp(SafeFloat(malletVel.z) / 10f, -1f, 1f));
+        // Mallet velocity
+        Vector3 vel = SafeVector3(computedMalletVelocity);
+        sensor.AddObservation(Mathf.Clamp(SafeFloat(vel.x) / 10f, -1f, 1f));
+        sensor.AddObservation(Mathf.Clamp(SafeFloat(vel.y) / 10f, -1f, 1f));
+        sensor.AddObservation(Mathf.Clamp(SafeFloat(vel.z) / 10f, -1f, 1f));
 
-        // Target relative position (3) + distance (1)
-        Vector3 targetRelativePos = SafeVector3(targetTransform.position - malletPos);
-        sensor.AddObservation(Mathf.Clamp(SafeFloat(targetRelativePos.x) / 2f, -1f, 1f));
-        sensor.AddObservation(Mathf.Clamp(SafeFloat(targetRelativePos.y) / 2f, -1f, 1f));
-        sensor.AddObservation(Mathf.Clamp(SafeFloat(targetRelativePos.z) / 2f, -1f, 1f));
-        float distanceToTarget = SafeFloat(targetRelativePos.magnitude);
-        sensor.AddObservation(Mathf.Clamp(distanceToTarget / 3f, 0f, 1f));
+        // Target relative position + distance
+        Vector3 relPos = SafeVector3(targetTransform.position - malletPos);
+        sensor.AddObservation(Mathf.Clamp(SafeFloat(relPos.x) / 2f, -1f, 1f));
+        sensor.AddObservation(Mathf.Clamp(SafeFloat(relPos.y) / 2f, -1f, 1f));
+        sensor.AddObservation(Mathf.Clamp(SafeFloat(relPos.z) / 2f, -1f, 1f));
+        float dist = SafeFloat(relPos.magnitude);
+        sensor.AddObservation(Mathf.Clamp(dist / 3f, 0f, 1f));
     }
-    
+
     // ============================================================================
-    // ACTION HANDLING (Control)
+    // ACTIONS
     // ============================================================================
-    
+
     public override void OnActionReceived(ActionBuffers actions)
     {
-        float[] continuousActions = actions.ContinuousActions.Array;
-        
-        if (continuousActions.Length != 3)
-        {
-            Debug.LogError($"ArmAgent: Expected 3 continuous actions, got {continuousActions.Length}");
-            return;
-        }
-        
-        // Map continuous actions [-1, 1] to target angular velocities (deg/sec)
+        float dt = Time.fixedDeltaTime;
+
         for (int i = 0; i < 3; i++)
         {
-            float action = continuousActions[i]; // [-1, 1]
-            float deltaVelocity = action * actionScale; // degrees/sec
+            var j = joints[i];
+            float action = actions.ContinuousActions[i]; // [-1, 1]
 
-            var hinge = jointRigidbodies[i].GetComponent<HingeJoint>();
-            float currentVelDeg = 0f;
-            if (hinge != null)
+            // Target velocity from action
+            float targetVel = action * j.maxSpeed;
+
+            // Accelerate toward target velocity
+            float velDiff = targetVel - j.currentVelocity;
+            float maxDelta = j.acceleration * dt;
+            float deltaVel = Mathf.Clamp(velDiff, -maxDelta, maxDelta);
+            j.currentVelocity += deltaVel;
+
+            // Clamp velocity to max speed
+            j.currentVelocity = Mathf.Clamp(j.currentVelocity, -j.maxSpeed, j.maxSpeed);
+
+            // Integrate angle
+            float newAngle = j.currentAngle + j.currentVelocity * dt;
+
+            // Clamp to limits and stop velocity if hitting limit
+            if (newAngle < j.minAngle)
             {
-                // Use Rigidbody angular velocity (x) as a proxy for hinge angular speed
-                currentVelDeg = jointRigidbodies[i].angularVelocity.x * Mathf.Rad2Deg; // deg/sec
+                newAngle = j.minAngle;
+                j.currentVelocity = 0f;
             }
-            else
+            else if (newAngle > j.maxAngle)
             {
-                currentVelDeg = jointRigidbodies[i].angularVelocity.x * Mathf.Rad2Deg;
+                newAngle = j.maxAngle;
+                j.currentVelocity = 0f;
             }
 
-            float targetVelocityDeg = Mathf.Clamp(
-                currentVelDeg + deltaVelocity,
-                -maxAngularVelocity,
-                maxAngularVelocity
-            );
+            j.currentAngle = newAngle;
 
-            currentTargetAngularVelocities[i] = targetVelocityDeg;
+            // Apply rotation to transform
+            ApplyJointRotation(j);
         }
 
-        ApplyJointControl();
-        
-        // Per-step penalty (time pressure)
+        // Rewards
         AddReward(-rewardPenaltyPerStep);
-        
-        // Distance shaping (weak encouragement toward target)
-        Vector3 targetRelativePos = targetTransform.position - malletRigidbody.position;
-        float distanceToTarget = targetRelativePos.magnitude;
-        AddReward(-rewardShapingDistance * (distanceToTarget / 3f)); // Normalize to [0, 1]
-        
+
+        Vector3 relPos = targetTransform.position - malletTransform.position;
+        float distToTarget = relPos.magnitude;
+        AddReward(-rewardShapingDistance * Mathf.Clamp01(distToTarget / 3f));
+
         stepsSinceLastReset++;
-        
-        // Check episode termination
         if (stepsSinceLastReset >= maxStepsPerEpisode)
         {
             EndEpisode();
         }
     }
-    
-    private void ApplyJointControl()
-    {
-        // Use HingeJoint motors when available; otherwise fallback to directly setting angular velocity.
-        for (int i = 0; i < 3; i++)
-        {
-            var hinge = jointRigidbodies[i].GetComponent<HingeJoint>();
-            float targetVelDeg = currentTargetAngularVelocities[i];
 
-            if (hinge != null)
-            {
-                JointMotor motor = hinge.motor;
-                motor.targetVelocity = targetVelDeg; // degrees/sec
-                motor.force = motorForce;
-                motor.freeSpin = motorFreeSpin;
-                hinge.motor = motor;
-                hinge.useMotor = true;
-            }
-            else
-            {
-                // Fallback: set rigidbody angular velocity (rad/s)
-                float targetVelRad = targetVelDeg * Mathf.Deg2Rad;
-                jointRigidbodies[i].angularVelocity = new Vector3(
-                    targetVelRad,
-                    jointRigidbodies[i].angularVelocity.y,
-                    jointRigidbodies[i].angularVelocity.z
-                );
-            }
-        }
+    private void ApplyJointRotation(JointConfig j)
+    {
+        // Rotate around local axis by currentAngle (absolute, not delta)
+        // We reconstruct the local rotation based on axis and angle.
+        Quaternion rot = Quaternion.AngleAxis(j.currentAngle, j.rotationAxis);
+        j.jointTransform.localRotation = rot;
     }
-    
+
     // ============================================================================
-    // COLLISION & STRIKE DETECTION
+    // COLLISION (strike detection on mallet)
     // ============================================================================
-    
+
     private void OnCollisionEnter(Collision collision)
     {
+        // Only process if the collision involves the mallet
         if (collision.gameObject == targetTransform.gameObject)
         {
             ValidateAndRewardStrike(collision);
         }
     }
-    
+
     private void ValidateAndRewardStrike(Collision collision)
     {
-        // Ensure we only reward once per strike
-        if (strikeValidatedThisFrame)
-            return;
+        if (strikeValidatedThisFrame) return;
         strikeValidatedThisFrame = true;
-        
-        // Get collision details
-        Vector3 malletVelocity = malletRigidbody.linearVelocity;
-        ContactPoint contactPoint = collision.contacts[0];
-        Vector3 collisionNormal = contactPoint.normal;
-        
-        // Strike validation checks:
-        // 1. Mallet velocity is primarily downward
-        float downwardComponent = Vector3.Dot(malletVelocity, Vector3.down);
-        float downwardRatio = downwardComponent / (malletVelocity.magnitude + 0.01f); // avoid divide by zero
-        
-        // 2. Collision normal points upward (hit from above)
-        float upwardComponent = Vector3.Dot(collisionNormal, Vector3.up);
-        
-        // 3. Impact velocity exceeds minimum threshold
-        float impactVelocity = malletVelocity.magnitude;
-        
-        bool isValidStrike = (downwardRatio > strikeVelocityDownwardThreshold) &&
-                             (upwardComponent > strikeNormalThreshold) &&
-                             (impactVelocity > minImpactVelocity);
-        
-        if (isValidStrike)
+
+        Vector3 malletVel = computedMalletVelocity;
+        ContactPoint contact = collision.contacts[0];
+        Vector3 normal = contact.normal;
+
+        float downwardComponent = Vector3.Dot(malletVel, Vector3.down);
+        float downwardRatio = downwardComponent / (malletVel.magnitude + 0.01f);
+        float upwardNormal = Vector3.Dot(normal, Vector3.up);
+        float impactVel = malletVel.magnitude;
+
+        bool valid = (downwardRatio > strikeVelocityDownwardThreshold) &&
+                     (upwardNormal > strikeNormalThreshold) &&
+                     (impactVel > minImpactVelocity);
+
+        if (valid)
         {
-            // Award base strike reward
             AddReward(rewardValidStrike);
-            
-            // Award velocity bonus (clamped to avoid extreme rewards)
-            float velocityBonus = Mathf.Clamp(impactVelocity, 0f, rewardMaxVelocityBonus);
-            AddReward(rewardVelocityMultiplier * velocityBonus / rewardMaxVelocityBonus);
-            
-            lastImpactVelocity = impactVelocity;
-            
-            Debug.Log($"VALID STRIKE! Velocity: {impactVelocity:F2} m/s, Downward ratio: {downwardRatio:F2}, Normal up: {upwardComponent:F2}");
-            // Schedule a randomized target relocation (XZ plane) relative to the arm base
-            Vector3 center = shoulderYawRigidbody != null ? shoulderYawRigidbody.position : malletRigidbody.position;
+            float velBonus = Mathf.Clamp(impactVel, 0f, rewardMaxVelocityBonus);
+            AddReward(rewardVelocityMultiplier * velBonus / rewardMaxVelocityBonus);
+            lastImpactVelocity = impactVel;
+
+            Debug.Log($"[ArmAgent] VALID STRIKE! Velocity={impactVel:F2} m/s, DownRatio={downwardRatio:F2}, NormalUp={upwardNormal:F2}");
+
+            // Schedule random target for next episode (local to agent)
+            Transform root = this.transform;
             float r = Random.Range(0f, targetRandomRadius);
             float theta = Random.Range(0f, Mathf.PI * 2f);
-            Vector3 offset = new Vector3(Mathf.Cos(theta) * r, 0f, Mathf.Sin(theta) * r);
-            pendingRandomTargetPos = new Vector3(center.x + offset.x, targetResetHeight, center.z + offset.z);
+            Vector3 localOffset = new Vector3(Mathf.Cos(theta) * r, 0f, Mathf.Sin(theta) * r);
+            // Randomize around configured `targetStartPosition` (local coordinates)
+            pendingRandomLocalOffset = targetStartPosition + new Vector3(localOffset.x, 0f, localOffset.z);
             pendingRandomTarget = true;
-            Debug.Log($"Target hit — scheduling random target at {pendingRandomTargetPos} and ending episode.");
-
+            Vector3 worldPos = root.TransformPoint(pendingRandomLocalOffset);
+            Debug.Log($"[ArmAgent] Target hit — next target at {worldPos} (local to agent). Ending episode.");
             EndEpisode();
         }
         else
         {
-            // Soft hit or incorrect angle - no reward
-            Debug.Log($"Invalid strike. Velocity: {impactVelocity:F2} m/s (min: {minImpactVelocity}), " +
-                $"Downward: {downwardRatio:F2} (min: {strikeVelocityDownwardThreshold}), " +
-                $"Normal up: {upwardComponent:F2} (min: {strikeNormalThreshold})");
+            Debug.Log($"[ArmAgent] Invalid strike. Vel={impactVel:F2}, DownRatio={downwardRatio:F2}, NormalUp={upwardNormal:F2}");
         }
     }
-    
+
     // ============================================================================
     // EPISODE MANAGEMENT
     // ============================================================================
-    
+
     public override void OnEpisodeBegin()
     {
-        // Reset arm to starting pose
-        ResetArmPose();
-        
-        // Reset target position
-        ResetTargetPosition();
-        
-        // Reset episode state
+        ResetArm();
+
+        // Ensure each episode starts with a randomized target local to this agent
+        if (!pendingRandomTarget)
+        {
+            Transform root = this.transform;
+            float r = Random.Range(0f, targetRandomRadius);
+            float theta = Random.Range(0f, Mathf.PI * 2f);
+            Vector3 localOffset = new Vector3(Mathf.Cos(theta) * r, 0f, Mathf.Sin(theta) * r);
+            // Randomize around configured `targetStartPosition` (local coordinates)
+            pendingRandomLocalOffset = targetStartPosition + localOffset;
+            pendingRandomTarget = true;
+            Vector3 worldPos = root.TransformPoint(pendingRandomLocalOffset);
+            Debug.Log($"[ArmAgent] Scheduled randomized start target at {worldPos}");
+        }
+
+        ResetTarget();
+
         stepsSinceLastReset = 0;
         strikeValidatedThisFrame = false;
         lastImpactVelocity = 0f;
-        
-        Debug.Log("Episode started");
-    }
-    
-    private void ResetArmPose()
-    {
-        // Reset each joint to starting rotation
-        // In a physics-based system, we zero velocities and apply small resets
-        // Make involved rigidbodies kinematic, snap to starting pose, zero velocities,
-        // then re-enable physics on the next FixedUpdate to avoid solver impulses.
-        foreach (var joint in jointRigidbodies)
-        {
-            // Make kinematic for a safe transform teleport
-            joint.isKinematic = true;
-            joint.linearVelocity = Vector3.zero;
-            joint.angularVelocity = Vector3.zero;
 
-            var hinge = joint.GetComponent<HingeJoint>();
-            if (hinge != null)
+        Debug.Log("[ArmAgent] Episode started.");
+    }
+
+    private void ResetArm()
+    {
+        for (int i = 0; i < joints.Length; i++)
+        {
+            var j = joints[i];
+            j.currentAngle = j.startAngle;
+            j.currentVelocity = 0f;
+            ApplyJointRotation(j);
+        }
+
+        // Reset mallet rigidbody if present (for collision detection)
+        if (malletRigidbody != null)
+        {
+            // Place mallet at its correct relative pose to the end joint and clear velocities
+            if (joints != null && joints.Length > 0)
             {
-                hinge.useMotor = false;
+                var endJoint = joints[joints.Length - 1];
+                Vector3 worldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+                Quaternion worldRot = endJoint.jointTransform.rotation * malletLocalRotation;
+                malletTransform.position = worldPos;
+                malletTransform.rotation = worldRot;
+                malletRigidbody.position = worldPos;
+                malletRigidbody.rotation = worldRot;
             }
-
-            // Reset rotation to configured starting rotation (local space)
-            joint.transform.localEulerAngles = startingArmRotation;
+            malletRigidbody.linearVelocity = Vector3.zero;
+            malletRigidbody.angularVelocity = Vector3.zero;
         }
 
-        // Reset mallet
-        malletRigidbody.isKinematic = true;
-        malletRigidbody.linearVelocity = Vector3.zero;
-        malletRigidbody.angularVelocity = Vector3.zero;
+        lastMalletPosition = malletTransform.position;
+        computedMalletVelocity = Vector3.zero;
 
-        Debug.Log("Arm pose reset to starting position (physics disabled temporarily)");
-
-        // Temporarily make target kinematic while resetting its transform
-        Rigidbody targetRb = targetTransform.GetComponent<Rigidbody>();
-        if (targetRb != null)
-        {
-            targetRb.isKinematic = true;
-            targetRb.linearVelocity = Vector3.zero;
-            targetRb.angularVelocity = Vector3.zero;
-        }
-
-        // Re-enable physics after a single FixedUpdate to avoid bounce/solver artifacts
-        StartCoroutine(ReenablePhysicsNextFixedUpdate());
+        Debug.Log("[ArmAgent] Arm reset to starting angles.");
     }
-    
-    private void ResetTargetPosition()
+
+    private void ResetTarget()
     {
-        // Reset target to either the pending randomized position (if scheduled)
-        // or the configured start position.
         if (pendingRandomTarget)
         {
-            targetTransform.position = pendingRandomTargetPos;
+            // Apply local offset if target is parented to this agent; otherwise compute world position.
+            if (targetTransform.IsChildOf(this.transform))
+            {
+                targetTransform.localPosition = pendingRandomLocalOffset;
+            }
+            else
+            {
+                targetTransform.position = this.transform.TransformPoint(pendingRandomLocalOffset);
+            }
             pendingRandomTarget = false;
-            Debug.Log($"Target randomized to {targetTransform.position}");
+            Debug.Log($"[ArmAgent] Target randomized to {targetTransform.position}");
         }
         else
         {
-            // Reset to configured start
-            targetTransform.position = targetStartPosition;
-            Debug.Log($"Target reset to {targetStartPosition}");
+            // Place target relative to this agent's transform
+            if (targetTransform.IsChildOf(this.transform))
+            {
+                targetTransform.localPosition = targetStartPosition;
+            }
+            else
+            {
+                targetTransform.position = this.transform.TransformPoint(new Vector3(targetStartPosition.x, targetStartPosition.y, targetStartPosition.z));
+            }
+            Debug.Log($"[ArmAgent] Target reset to {targetTransform.position} (local to agent)");
         }
 
-        // Ensure target rigidbody is not moving
         Rigidbody targetRb = targetTransform.GetComponent<Rigidbody>();
         if (targetRb != null)
         {
@@ -472,81 +524,42 @@ public class ArmAgent : Agent
             targetRb.angularVelocity = Vector3.zero;
         }
     }
-    
+
     // ============================================================================
-    // EPISODE TERMINATION
+    // UTILITY
     // ============================================================================
-    
+
     public void BombHit()
     {
-        // Called when agent hits a bomb (for future multi-target support)
         AddReward(-penaltyBombHit);
         EndEpisode();
-        Debug.Log("BOMB HIT! Episode ended.");
+        Debug.Log("[ArmAgent] BOMB HIT! Episode ended.");
     }
-    
-    // ============================================================================
-    // FRAME UPDATE LOGIC
-    // ============================================================================
-    
+
     private void LateUpdate()
     {
-        // Reset strike validation flag each frame
         strikeValidatedThisFrame = false;
     }
-    
-    // ============================================================================
-    // UTILITIES & DEBUGGING
-    // ============================================================================
-    
-    [ContextMenu("Print Current Observations")]
+
+    [ContextMenu("Print Observations")]
     public void PrintObservations()
     {
-        Debug.Log("=== Current Observations ===");
-        for (int i = 0; i < 3; i++)
+        Debug.Log("=== ArmAgent Observations ===");
+        for (int i = 0; i < joints.Length; i++)
         {
-            float angle = jointRigidbodies[i].transform.localEulerAngles.x;
-            angle = angle > 180 ? angle - 360 : angle;
-            Debug.Log($"Joint {i} - Angle: {angle:F1}°, AngVel: {jointRigidbodies[i].angularVelocity.magnitude:F2} rad/s");
+            var j = joints[i];
+            Debug.Log($"Joint {i}: Angle={j.currentAngle:F1}° Vel={j.currentVelocity:F1}°/s  Limits=[{j.minAngle},{j.maxAngle}]");
         }
-        
-        Vector3 targetRelPos = targetTransform.position - malletRigidbody.position;
-        Debug.Log($"Mallet Pos: {malletRigidbody.position}, Target Pos: {targetTransform.position}");
-        Debug.Log($"Distance to target: {targetRelPos.magnitude:F2}m");
-        Debug.Log($"Mallet Velocity: {malletRigidbody.linearVelocity.magnitude:F2} m/s (Last impact: {lastImpactVelocity:F2} m/s)");
-        Debug.Log($"Steps this episode: {stepsSinceLastReset}/{maxStepsPerEpisode}");
+        Debug.Log($"Mallet Pos: {malletTransform.position}, Vel: {computedMalletVelocity}");
+        Debug.Log($"Target Pos: {targetTransform.position}, Dist: {(targetTransform.position - malletTransform.position).magnitude:F2}m");
+        Debug.Log($"Steps: {stepsSinceLastReset}/{maxStepsPerEpisode}");
     }
-    
-    [ContextMenu("Trigger Manual Strike Test")]
+
+    [ContextMenu("Test Strike")]
     public void TestStrike()
     {
-        // Apply downward velocity to mallet for testing strike detection
-        malletRigidbody.linearVelocity = new Vector3(0, -5f, 0);
-        Debug.Log("Applied downward velocity to mallet for strike test");
-    }
-
-    private IEnumerator ReenablePhysicsNextFixedUpdate()
-    {
-        // Wait a single fixed update to allow physics to settle after teleport
-        yield return new WaitForFixedUpdate();
-
-        // Re-enable physics for joints and mallet
-        foreach (var joint in jointRigidbodies)
-        {
-            joint.isKinematic = false;
-            var hinge = joint.GetComponent<HingeJoint>();
-            if (hinge != null)
-            {
-                hinge.useMotor = false;
-            }
-        }
-
-        malletRigidbody.isKinematic = false;
-
-        Rigidbody targetRb = targetTransform.GetComponent<Rigidbody>();
-        if (targetRb != null)
-        {
-            targetRb.isKinematic = false;
-        }
+        // Simulate a downward strike for testing collision
+        computedMalletVelocity = new Vector3(0, -5f, 0);
+        Debug.Log("[ArmAgent] Test strike velocity applied.");
     }
 }
