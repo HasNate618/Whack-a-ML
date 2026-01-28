@@ -464,11 +464,13 @@ public class ArmAgent : Agent
     {
         if (strikeValidatedThisFrame) return;
         strikeValidatedThisFrame = true;
-
         Vector3 malletVel = computedMalletVelocity;
         ContactPoint contact = collision.contacts[0];
         Vector3 normal = contact.normal;
 
+        // Temporarily accept all strikes. Commenting out the detailed
+        // approach/normal checks so training can focus on contact handling.
+        /*
         float impactVel = malletVel.magnitude;
         // Approach velocity along the surface normal (positive when moving into the target)
         float approachVel = Vector3.Dot(malletVel, -normal);
@@ -478,6 +480,9 @@ public class ArmAgent : Agent
         float normalUp = Vector3.Dot(normal, Vector3.up);
 
         bool valid = (approachVel > minImpactVelocity) && isMovingDownward && (normalUp > strikeNormalThreshold);
+        */
+        float impactVel = malletVel.magnitude;
+        bool valid = true;
 
         if (valid)
         {
@@ -486,7 +491,7 @@ public class ArmAgent : Agent
             AddReward(rewardVelocityMultiplier * velBonus / rewardMaxVelocityBonus);
             lastImpactVelocity = impactVel;
 
-            Debug.Log($"[ArmAgent] VALID STRIKE! Velocity={impactVel:F2} m/s, Approach={approachVel:F2}, NormalUp={normalUp:F2}");
+            Debug.Log($"[ArmAgent] VALID STRIKE! Velocity={impactVel:F2} m/s (validation bypassed)");
 
             // Schedule random target for next episode (local to agent)
             Transform root = this.transform;
@@ -503,7 +508,7 @@ public class ArmAgent : Agent
         }
         else
         {
-            Debug.Log($"[ArmAgent] Invalid strike. Vel={impactVel:F2}, Approach={approachVel:F2}, NormalUp={normalUp:F2}");
+            Debug.Log($"[ArmAgent] Invalid strike. Vel={impactVel:F2} (validation bypassed)");
         }
     }
 

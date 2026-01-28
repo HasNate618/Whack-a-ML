@@ -899,7 +899,7 @@ MonoBehaviour:
   rewardPenaltyPerStep: 0.001
   rewardShapingDistance: 0.01
   penaltyBombHit: 2
-  maxStepsPerEpisode: 5000
+  maxStepsPerEpisode: 15000
   targetStartPosition: {x: 0, y: 0, z: 2.5}
   targetResetHeight: 0
   targetRandomRadius: 1.5

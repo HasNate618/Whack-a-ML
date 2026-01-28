@@ -17,6 +17,7 @@ behaviors:
       extrinsic:
         gamma: 0.99
         strength: 1.0
+    # environment_parameters removed — use EnvironmentParameters side channel from Unity instead
     max_steps: 500000
     time_horizon: 64
     summary_freq: 50000
