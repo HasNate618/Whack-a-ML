@@ -20,12 +20,11 @@ The goal is to demonstrate practical ML system design in Unity, combining roboti
 
 ---
 
-## Demo Video
+## Demo
 
-<video width="640" height="360" controls>
-  <source src="Media/Demo1.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+<p align="center" width="100%">
+  <video src="https://raw.githubusercontent.com/HasNate618/Whack-a-ML/master/Media/Demo1.mp4" width="80%" controls></video>
+</p>
 
 ---
 
