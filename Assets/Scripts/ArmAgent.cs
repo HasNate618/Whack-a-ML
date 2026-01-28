@@ -69,6 +69,10 @@ public class ArmAgent : Agent
     [SerializeField] private Rigidbody malletRigidbody;
     [SerializeField] private Transform targetTransform;
 
+    // Public accessors for helper components (used by TargetHitProxy)
+    public Rigidbody GetMalletRigidbody() { return malletRigidbody; }
+    public Transform GetMalletTransform() { return malletTransform; }
+
     // ============================================================================
     // STRIKE VALIDATION
     // ============================================================================
@@ -77,14 +81,16 @@ public class ArmAgent : Agent
     [SerializeField] private float minImpactVelocity = 2f;
     [SerializeField] private float strikeNormalThreshold = 0.5f;
     [SerializeField] private float strikeVelocityDownwardThreshold = 0.5f;
+    [Tooltip("Minimum allowed floor Y for the mallet (prevents going below floor)")]
+    [SerializeField] private float floorY = 0f;
 
     // ============================================================================
     // REWARDS
     // ============================================================================
 
     [Header("Rewards")]
-    [SerializeField] private float rewardValidStrike = 1f;
-    [SerializeField] private float rewardVelocityMultiplier = 0.2f;
+    [SerializeField] private float rewardValidStrike = 1.5f;
+    [SerializeField] private float rewardVelocityMultiplier = 0.5f;
     [SerializeField] private float rewardMaxVelocityBonus = 5f;
     [SerializeField] private float rewardPenaltyPerStep = 0.001f;
     [SerializeField] private float rewardShapingDistance = 0.01f;
@@ -210,7 +216,8 @@ public class ArmAgent : Agent
         // Schedule an initial randomized local target offset so the first episode
         // begins with a randomized target local to this agent.
         {
-            float r = Random.Range(0f, targetRandomRadius);
+            // Place on the outer radius (on circumference)
+            float r = targetRandomRadius;
             float theta = Random.Range(0f, Mathf.PI * 2f);
             // Randomize around configured `targetStartPosition` (local coordinates)
             pendingRandomLocalOffset = targetStartPosition + new Vector3(Mathf.Cos(theta) * r, 0f, Mathf.Sin(theta) * r);
@@ -232,15 +239,25 @@ public class ArmAgent : Agent
         if (joints != null && joints.Length > 0 && malletTransform != null)
         {
             var endJoint = joints[joints.Length - 1];
-            // Reconstruct the mallet pose using the stored local offset so the mallet
-            // remains at the same local pose relative to the elbow joint.
-            Vector3 worldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+            // Compute mallet world pose from stored local offset
+            Vector3 malletWorldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
             Quaternion worldRot = endJoint.jointTransform.rotation * malletLocalRotation;
-            malletTransform.position = worldPos;
+
+            // If mallet would be below the floor, try to raise it by adjusting
+            // the pitch joints (shoulder pitch and elbow) so the arm bends upward
+            // instead of translating the entire agent.
+            if (malletWorldPos.y < floorY)
+            {
+                TryRaiseMalletByAdjustingPitchJoints(floorY);
+                malletWorldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+                worldRot = endJoint.jointTransform.rotation * malletLocalRotation;
+            }
+
+            malletTransform.position = malletWorldPos;
             malletTransform.rotation = worldRot;
             if (malletRigidbody != null)
             {
-                malletRigidbody.MovePosition(worldPos);
+                malletRigidbody.MovePosition(malletWorldPos);
                 malletRigidbody.MoveRotation(worldRot);
             }
         }
@@ -356,6 +373,72 @@ public class ArmAgent : Agent
         }
     }
 
+    /// <summary>
+    /// Iteratively nudges the pitch joints (indices 1 and 2) to raise the mallet
+    /// until its world Y is >= floorY or no further improvement is possible.
+    /// Uses small test steps and respects joint limits.
+    /// </summary>
+    private void TryRaiseMalletByAdjustingPitchJoints(float floorYTarget)
+    {
+        if (joints == null || joints.Length < 3) return;
+        var endJoint = joints[joints.Length - 1];
+
+        const int maxIters = 20;
+        const float testStep = 1f; // degrees
+
+        for (int iter = 0; iter < maxIters; iter++)
+        {
+            Vector3 worldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+            if (worldPos.y >= floorYTarget) break;
+
+            bool anyImproved = false;
+
+            // Only adjust the pitch joints (shoulder pitch index 1 and elbow index 2)
+            for (int jointIdx = 1; jointIdx <= 2; jointIdx++)
+            {
+                var j = joints[jointIdx];
+                float original = j.currentAngle;
+
+                float bestAngle = original;
+                float bestY = worldPos.y;
+
+                // Test both directions to see which increases the mallet Y
+                for (int sign = -1; sign <= 1; sign += 2)
+                {
+                    float candidate = Mathf.Clamp(original + sign * testStep, j.minAngle, j.maxAngle);
+                    j.currentAngle = candidate;
+                    ApplyJointRotation(j);
+                    Vector3 candidatePos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+                    if (candidatePos.y > bestY + 1e-4f)
+                    {
+                        bestY = candidatePos.y;
+                        bestAngle = candidate;
+                    }
+                }
+
+                // Apply the best found angle for this joint
+                if (Mathf.Abs(bestAngle - original) > 1e-4f)
+                {
+                    j.currentAngle = bestAngle;
+                    ApplyJointRotation(j);
+                    anyImproved = true;
+                }
+                else
+                {
+                    // restore original (no improvement)
+                    j.currentAngle = original;
+                    ApplyJointRotation(j);
+                }
+
+                // update worldPos for next joint's tests
+                worldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+                if (worldPos.y >= floorYTarget) break;
+            }
+
+            if (!anyImproved) break;
+        }
+    }
+
     private void ApplyJointRotation(JointConfig j)
     {
         // Rotate around local axis by currentAngle (absolute, not delta)
@@ -377,7 +460,7 @@ public class ArmAgent : Agent
         }
     }
 
-    private void ValidateAndRewardStrike(Collision collision)
+    public void ValidateAndRewardStrike(Collision collision)
     {
         if (strikeValidatedThisFrame) return;
         strikeValidatedThisFrame = true;
@@ -386,14 +469,15 @@ public class ArmAgent : Agent
         ContactPoint contact = collision.contacts[0];
         Vector3 normal = contact.normal;
 
-        float downwardComponent = Vector3.Dot(malletVel, Vector3.down);
-        float downwardRatio = downwardComponent / (malletVel.magnitude + 0.01f);
-        float upwardNormal = Vector3.Dot(normal, Vector3.up);
         float impactVel = malletVel.magnitude;
+        // Approach velocity along the surface normal (positive when moving into the target)
+        float approachVel = Vector3.Dot(malletVel, -normal);
 
-        bool valid = (downwardRatio > strikeVelocityDownwardThreshold) &&
-                     (upwardNormal > strikeNormalThreshold) &&
-                     (impactVel > minImpactVelocity);
+        // Ensure motion is generally downward (y component negative), and approach is along the contact normal
+        bool isMovingDownward = malletVel.y < -0.1f;
+        float normalUp = Vector3.Dot(normal, Vector3.up);
+
+        bool valid = (approachVel > minImpactVelocity) && isMovingDownward && (normalUp > strikeNormalThreshold);
 
         if (valid)
         {
@@ -402,11 +486,12 @@ public class ArmAgent : Agent
             AddReward(rewardVelocityMultiplier * velBonus / rewardMaxVelocityBonus);
             lastImpactVelocity = impactVel;
 
-            Debug.Log($"[ArmAgent] VALID STRIKE! Velocity={impactVel:F2} m/s, DownRatio={downwardRatio:F2}, NormalUp={upwardNormal:F2}");
+            Debug.Log($"[ArmAgent] VALID STRIKE! Velocity={impactVel:F2} m/s, Approach={approachVel:F2}, NormalUp={normalUp:F2}");
 
             // Schedule random target for next episode (local to agent)
             Transform root = this.transform;
-            float r = Random.Range(0f, targetRandomRadius);
+            // Place on the outer radius (on circumference)
+            float r = targetRandomRadius;
             float theta = Random.Range(0f, Mathf.PI * 2f);
             Vector3 localOffset = new Vector3(Mathf.Cos(theta) * r, 0f, Mathf.Sin(theta) * r);
             // Randomize around configured `targetStartPosition` (local coordinates)
@@ -418,7 +503,7 @@ public class ArmAgent : Agent
         }
         else
         {
-            Debug.Log($"[ArmAgent] Invalid strike. Vel={impactVel:F2}, DownRatio={downwardRatio:F2}, NormalUp={upwardNormal:F2}");
+            Debug.Log($"[ArmAgent] Invalid strike. Vel={impactVel:F2}, Approach={approachVel:F2}, NormalUp={normalUp:F2}");
         }
     }
 
@@ -434,7 +519,8 @@ public class ArmAgent : Agent
         if (!pendingRandomTarget)
         {
             Transform root = this.transform;
-            float r = Random.Range(0f, targetRandomRadius);
+            // Place on the outer radius (on circumference)
+            float r = targetRandomRadius;
             float theta = Random.Range(0f, Mathf.PI * 2f);
             Vector3 localOffset = new Vector3(Mathf.Cos(theta) * r, 0f, Mathf.Sin(theta) * r);
             // Randomize around configured `targetStartPosition` (local coordinates)
@@ -472,6 +558,14 @@ public class ArmAgent : Agent
                 var endJoint = joints[joints.Length - 1];
                 Vector3 worldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
                 Quaternion worldRot = endJoint.jointTransform.rotation * malletLocalRotation;
+                // If mallet would be below the floor, adjust pitch joints so the
+                // arm bends upward and the mallet remains attached.
+                if (worldPos.y < floorY)
+                {
+                    TryRaiseMalletByAdjustingPitchJoints(floorY);
+                    worldPos = endJoint.jointTransform.TransformPoint(malletLocalPosition);
+                    worldRot = endJoint.jointTransform.rotation * malletLocalRotation;
+                }
                 malletTransform.position = worldPos;
                 malletTransform.rotation = worldRot;
                 malletRigidbody.position = worldPos;

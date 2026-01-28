@@ -240,13 +240,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2744228980471527780}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.5, y: 0.5, z: 0.5, w: 0.5}
+  m_LocalRotation: {x: 0, y: 0, z: 0.7071068, w: 0.7071068}
   m_LocalPosition: {x: 0, y: 2, z: 0}
   m_LocalScale: {x: 0.5, y: 0.5, z: 0.5}
   m_ConstrainProportionsScale: 1
   m_Children: []
   m_Father: {fileID: 7046991224522805691}
-  m_LocalEulerAnglesHint: {x: 0, y: 90, z: 90}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 90}
 --- !u!33 &7281176802804774693
 MeshFilter:
   m_ObjectHideFlags: 0
@@ -414,13 +414,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 4993017953549383182}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.5, y: 0.5, z: -0.5, w: 0.5}
+  m_LocalRotation: {x: 0.7071068, y: 0, z: 0, w: 0.7071068}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 0.4, y: 0.10000004, z: 0.4}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 9218773400764004750}
-  m_LocalEulerAnglesHint: {x: 90, y: 90, z: 0}
+  m_LocalEulerAnglesHint: {x: 90, y: 0, z: 0}
 --- !u!33 &3694321415328893088
 MeshFilter:
   m_ObjectHideFlags: 0
@@ -580,13 +580,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 5207825129140358795}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.5, y: 0.5, z: -0.5, w: 0.5}
+  m_LocalRotation: {x: 0.7071068, y: 0, z: 0, w: 0.7071068}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 0.4, y: 0.1, z: 0.4}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 7046991224522805691}
-  m_LocalEulerAnglesHint: {x: 90, y: 90, z: 0}
+  m_LocalEulerAnglesHint: {x: 90, y: 0, z: 0}
 --- !u!33 &8121119456358661205
 MeshFilter:
   m_ObjectHideFlags: 0
@@ -892,16 +892,17 @@ MonoBehaviour:
   minImpactVelocity: 2
   strikeNormalThreshold: 0.5
   strikeVelocityDownwardThreshold: 0.5
-  rewardValidStrike: 1
-  rewardVelocityMultiplier: 0.2
+  floorY: 0
+  rewardValidStrike: 1.5
+  rewardVelocityMultiplier: 0.5
   rewardMaxVelocityBonus: 5
   rewardPenaltyPerStep: 0.001
   rewardShapingDistance: 0.01
   penaltyBombHit: 2
-  maxStepsPerEpisode: 10000
-  targetStartPosition: {x: 0, y: 0, z: 3}
+  maxStepsPerEpisode: 5000
+  targetStartPosition: {x: 0, y: 0, z: 2.5}
   targetResetHeight: 0
-  targetRandomRadius: 2
+  targetRandomRadius: 1.5
 --- !u!114 &8123962657418760411
 MonoBehaviour:
   m_ObjectHideFlags: 0

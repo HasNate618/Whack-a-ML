@@ -258,6 +258,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: Environment (1)
       objectReference: {fileID: 0}
+    - target: {fileID: 2061023082959446763, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
+      propertyPath: maxStepsPerEpisode
+      value: 10000
+      objectReference: {fileID: 0}
     - target: {fileID: 8433605846090356138, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_LocalPosition.x
       value: -0.024014473
@@ -314,6 +318,10 @@ PrefabInstance:
     - target: {fileID: 1292763514015276939, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_Name
       value: Environment (4)
+      objectReference: {fileID: 0}
+    - target: {fileID: 2061023082959446763, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
+      propertyPath: maxStepsPerEpisode
+      value: 10000
       objectReference: {fileID: 0}
     - target: {fileID: 8433605846090356138, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_LocalPosition.x
@@ -421,6 +429,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: Environment (3)
       objectReference: {fileID: 0}
+    - target: {fileID: 2061023082959446763, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
+      propertyPath: maxStepsPerEpisode
+      value: 10000
+      objectReference: {fileID: 0}
     - target: {fileID: 8433605846090356138, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_LocalPosition.x
       value: -8
@@ -496,7 +508,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: f5617217689744442ab986fef2fce5e0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::TimeScaleController
-  timeScale: 1
+  timeScale: 5
 --- !u!4 &1765316968
 Transform:
   m_ObjectHideFlags: 0
@@ -536,6 +548,10 @@ PrefabInstance:
     - target: {fileID: 1292763514015276939, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_Name
       value: Environment (2)
+      objectReference: {fileID: 0}
+    - target: {fileID: 2061023082959446763, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
+      propertyPath: maxStepsPerEpisode
+      value: 10000
       objectReference: {fileID: 0}
     - target: {fileID: 8433605846090356138, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_LocalPosition.x
@@ -594,6 +610,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: Environment (5)
       objectReference: {fileID: 0}
+    - target: {fileID: 2061023082959446763, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
+      propertyPath: maxStepsPerEpisode
+      value: 10000
+      objectReference: {fileID: 0}
     - target: {fileID: 8433605846090356138, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_LocalPosition.x
       value: -8
@@ -650,6 +670,10 @@ PrefabInstance:
     - target: {fileID: 1292763514015276939, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_Name
       value: Environment
+      objectReference: {fileID: 0}
+    - target: {fileID: 2061023082959446763, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
+      propertyPath: maxStepsPerEpisode
+      value: 10000
       objectReference: {fileID: 0}
     - target: {fileID: 8433605846090356138, guid: 58c36b5c8b15efa47977295f98e289a5, type: 3}
       propertyPath: m_LocalPosition.x
