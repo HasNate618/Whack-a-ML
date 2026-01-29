@@ -23,7 +23,7 @@ The goal is to demonstrate practical ML system design in Unity, combining roboti
 ## Demo
 
 <p align="center" width="100%">
-  <video src="https://raw.githubusercontent.com/HasNate618/Whack-a-ML/master/Media/Demo1.mp4" width="80%" controls></video>
+  <video src="https://github.com/user-attachments/assets/2d619dbd-0ab6-44d1-bdb1-5294a8d0c91d" width="80%" controls></video>
 </p>
 
 ---
